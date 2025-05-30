@@ -1,0 +1,12 @@
+[project]
+name = "xbrl-parser"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "arelle-release[crypto,db,efm,objectmaker,webserver]>=2.37.13",
+    "pandas>=2.2.3",
+    "requests>=2.32.3",
+    "rdflib>=7.0.0",
+]
