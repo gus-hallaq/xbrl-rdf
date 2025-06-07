@@ -1,7 +1,8 @@
 import os
 import json
 from typing import Dict, List, Optional, Any
-from arelle import Cntlr, ModelManager, FileSource
+from arelle import Cntlr, ModelManager, FileSource, ModelXbrl
+from arelle.ModelDocument import Type
 from arelle.ModelDtsObject import ModelConcept
 from arelle.ModelInstanceObject import ModelFact
 import pandas as pd
@@ -31,7 +32,7 @@ class XBRLParser:
         """
         try:
             file_source = FileSource.FileSource(file_path)
-            self.model_xbrl = self.model_manager.load(file_source)
+            self.model_xbrl = self.model_manager.load(file_source, isSupplementalFile=False)
             return self.model_xbrl is not None
         except Exception as e:
             print(f"Error loading XBRL file: {e}")
@@ -43,7 +44,6 @@ class XBRLParser:
             return {}
             
         company_info = {}
-        
         # Common DEI (Document and Entity Information) concepts
         dei_concepts = {
             'EntityRegistrantName': 'company_name',
@@ -51,14 +51,45 @@ class XBRLParser:
             'TradingSymbol': 'ticker',
             'DocumentPeriodEndDate': 'period_end_date',
             'DocumentType': 'document_type',
-            'EntityFilerCategory': 'filer_category'
+            'EntityFilerCategory': 'filer_category',
+            'AmendmentFlag': 'amendment_flag',
+            'DocumentFiscalYearFocus': 'document_fiscal_year_focus',
+            'DocumentFiscalPeriodFocus': 'document_fiscal_period_focus',
+            'EmployeeServiceShareBasedCompensationNonvestedAwardsCompensationCostExpensedInNextTwelveMonthsExpectedToExceedPercentage': 'employee_service_share_based_compensation_nonvested_awards_compensation_cost_expensed_in_next_twelve_months_expected_to_exceed_percentage',
+            'DocumentAnnualReport': 'document_annual_report',
+            'CurrentFiscalYearEndDate': 'current_fiscal_year_end_date',
+            'DocumentTransitionReport': 'document_transition_report',
+            'EntityFileNumber': 'entity_file_number',
+            'EntityIncorporationStateCountryCode': 'entity_incorporation_state_country_code',
+            'EntityTaxIdentificationNumber': 'entity_tax_identification_number',
+            'EntityAddressAddressLine1': 'entity_address_address_line_1',
+            'EntityAddressCityOrTown': 'entity_address_city_or_town',
+            'EntityAddressStateOrProvince': 'entity_address_state_or_province',
+            'EntityAddressPostalZipCode': 'entity_address_postal_zip_code',
+            'CityAreaCode': 'city_area_code',
+            'LocalPhoneNumber': 'local_phone_number',
+            'Security12bTitle': 'security_12b_title',
+            'SecurityExchangeName': 'security_exchange_name',
+            'EntityWellKnownSeasonedIssuer': 'entity_well_known_seasoned_issuer',
+            'EntityVoluntaryFilers': 'entity_voluntary_filers',
+            'EntityCurrentReportingStatus': 'entity_current_reporting_status',
+            'EntityInteractiveDataCurrent': 'entity_interactive_data_current',
+            'EntitySmallBusiness': 'entity_small_business',
+            'EntityEmergingGrowthCompany': 'entity_emerging_growth_company',
+            'IcfrAuditorAttestationFlag': 'icfr_auditor_attestation_flag',
+            'DocumentFinStmtErrorCorrectionFlag': 'document_fin_stmt_error_correction_flag',
+            'EntityShellCompany': 'entity_shell_company',
+            'EntityPublicFloat': 'entity_public_float',
+            'EntityCommonStockSharesOutstanding': 'entity_common_stock_shares_outstanding',
+            'DocumentsIncorporatedByReferenceTextBlock': 'documents_incorporated_by_reference_text_block'
         }
-        
+
         for fact in self.model_xbrl.facts:
             concept_name = fact.concept.name
+            
             if concept_name in dei_concepts:
                 company_info[dei_concepts[concept_name]] = fact.value
-                
+        
         return company_info
     
     def extract_facts(self, concept_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
@@ -85,6 +116,7 @@ class XBRLParser:
                 
             fact_info = {
                 'concept': concept_name,
+                'concept_qname': fact.concept.qname,
                 'namespace': fact.concept.qname.namespaceURI,
                 'value': fact.value,
                 'unit': self._get_unit_info(fact),
@@ -92,7 +124,6 @@ class XBRLParser:
                 'decimals': getattr(fact, 'decimals', None),
                 'precision': getattr(fact, 'precision', None)
             }
-            
             facts_data.append(fact_info)
             
         return facts_data
@@ -202,24 +233,82 @@ class XBRLParser:
         }
         
         # Schema references
-        for schema_ref in self.model_xbrl.schemaLocationElements.values():
-            taxonomy_info['schema_refs'].append({
-                'namespace': schema_ref.namespaceURI,
-                'location': schema_ref.schemaLocation
-            })
-        
-        # Linkbase references  
-        for linkbase_ref in self.model_xbrl.linkbaseDiscover:
-            taxonomy_info['linkbase_refs'].append({
-                'type': linkbase_ref.arcrole,
-                'href': linkbase_ref.href
-            })
-            
+        for doc in self.model_xbrl.urlDocs.values():
+            if doc.type == Type.SCHEMA:
+                taxonomy_info['schema_refs'].append({
+                        'namespace': doc.targetNamespace,
+                        'location': doc.uri
+                    })
+            elif doc.type == Type.LINKBASE:
+                # Get the arcrole from the linkbase document's roleRefs
+                taxonomy_info['linkbase_refs'].append({
+                        'base': doc.basename,
+                        'type': value.referenceTypes,
+                        'href': doc.uri
+                    })
+
         # Namespace prefixes
-        taxonomy_info['namespaces'] = dict(self.model_xbrl.prefixedNamespaces)
+        if hasattr(self.model_xbrl, 'prefixedNamespaces'):
+            taxonomy_info['namespaces'] = dict(self.model_xbrl.prefixedNamespaces)
         
         return taxonomy_info
     
+    def get_presentation_hierarchy(self):
+        """Get presentation hierarchy"""
+        # Get presentation relationships
+        pres_linkbase = self.model_xbrl.relationshipSet("http://www.xbrl.org/2003/arcrole/parent-child")
+        
+        # Get root concepts (those without parents)
+        roots = pres_linkbase.rootConcepts
+        
+        def print_hierarchy(concept, level=0):
+            indent = "  " * level
+            print(f"{indent}{concept.qname}: {concept.label()}")
+            
+            # Get children
+            children = pres_linkbase.fromModelObject(concept)
+            for rel in sorted(children, key=lambda x: x.order):
+                print_hierarchy(rel.toModelObject, level + 1)
+        
+        for root in roots:
+            print_hierarchy(root)
+
+    def get_calculation_relationships(self):
+        """Get calculation relationships"""
+        calc_linkbase = self.model_xbrl.relationshipSet("http://www.xbrl.org/2003/arcrole/summation-item")
+        
+        for rel in calc_linkbase.modelRelationships:
+            parent = rel.fromModelObject
+            child = rel.toModelObject
+            weight = rel.weight
+            
+            print(f"{parent.qname} = {child.qname} * {weight}")
+
+    def arcrole_uri(self) -> list:
+        """Get the URI for an arcrole"""
+        arcrole_uri = set()
+        for k,v in self.model_xbrl.baseSets.items():
+            if k[0] == "XBRL-dimensions":
+                continue
+            arcrole_uri.add(k[0])
+        return list(arcrole_uri)
+    
+    def get_all_relationships(self) -> list:
+        """Get all relationships"""
+        
+        for arcrole_uri in self.arcrole_uri():
+            linkbase = self.model_xbrl.relationshipSet(arcrole_uri)
+            
+            print(f"Arcrole: {arcrole_uri}")
+
+            for rel in linkbase.modelRelationships:
+                parent = rel.fromModelObject
+                child = rel.toModelObject
+                print(f"{parent.qname} -> {child.qname}")
+            print("--------------------------------")
+        
+        return 
+
     def export_to_json(self, output_path: str, include_facts: bool = True, 
                       include_company_info: bool = True, include_taxonomy: bool = False):
         """
@@ -252,6 +341,204 @@ class XBRLParser:
         if self.controller:
             self.controller.close()
 
+    def validate_instance(self) -> Dict[str, Any]:
+        """
+        Validate the XBRL instance against its taxonomy.
+        
+        Returns:
+            Dictionary containing validation results and any errors/warnings
+        """
+        if not self.model_xbrl:
+            return {'status': 'error', 'message': 'No XBRL instance loaded'}
+            
+        validation_results = {
+            'status': 'success',
+            'errors': [],
+            'warnings': []
+        }
+        
+        # Check for required facts
+        required_concepts = self._get_required_concepts()
+        for concept in required_concepts:
+            if not any(fact.concept == concept for fact in self.model_xbrl.facts):
+                validation_results['warnings'].append(f"Missing required fact: {concept.qname}")
+        
+        # Check calculation consistency
+        calc_errors = self._validate_calculations()
+        validation_results['errors'].extend(calc_errors)
+        
+        if validation_results['errors']:
+            validation_results['status'] = 'error'
+            
+        return validation_results
+    
+    def _get_required_concepts(self) -> List[ModelConcept]:
+        """Get list of required concepts from taxonomy."""
+        required_concepts = []
+        for concept in self.model_xbrl.qnameConcepts.values():
+            if concept.isRequired:
+                required_concepts.append(concept)
+        return required_concepts
+    
+    def _validate_calculations(self) -> List[str]:
+        """Validate calculation relationships."""
+        errors = []
+        calc_linkbase = self.model_xbrl.relationshipSet("http://www.xbrl.org/2003/arcrole/summation-item")
+        
+        for rel in calc_linkbase.modelRelationships:
+            parent = rel.fromModelObject
+            child = rel.toModelObject
+            weight = rel.weight
+            
+            # Get parent and child values
+            parent_facts = [f for f in self.model_xbrl.facts if f.concept == parent]
+            child_facts = [f for f in self.model_xbrl.facts if f.concept == child]
+            
+            if parent_facts and child_facts:
+                for parent_fact in parent_facts:
+                    # Find matching child facts by context
+                    matching_children = [f for f in child_facts if f.context == parent_fact.context]
+                    if matching_children:
+                        calculated_sum = sum(float(f.value) * weight for f in matching_children)
+                        actual_value = float(parent_fact.value)
+                        if abs(calculated_sum - actual_value) > 0.01:  # Allow small rounding differences
+                            errors.append(f"Calculation error: {parent.qname} = {calculated_sum}, actual = {actual_value}")
+        
+        return errors
+    
+    def calculate_financial_ratios(self) -> Dict[str, float]:
+        """
+        Calculate common financial ratios from the XBRL data.
+        
+        Returns:
+            Dictionary of calculated ratios
+        """
+        if not self.model_xbrl:
+            return {}
+            
+        ratios = {}
+        facts = {fact.concept.qname: float(fact.value) for fact in self.model_xbrl.facts 
+                if fact.value and fact.value.strip() and fact.value.replace('.', '').isdigit()}
+        
+        # Current Ratio
+        if 'AssetsCurrent' in facts and 'LiabilitiesCurrent' in facts:
+            ratios['current_ratio'] = facts['AssetsCurrent'] / facts['LiabilitiesCurrent']
+        
+        # Debt to Equity Ratio
+        if 'Liabilities' in facts and 'StockholdersEquity' in facts:
+            ratios['debt_to_equity'] = facts['Liabilities'] / facts['StockholdersEquity']
+        
+        # Return on Assets (ROA)
+        if 'NetIncomeLoss' in facts and 'Assets' in facts:
+            ratios['roa'] = facts['NetIncomeLoss'] / facts['Assets']
+        
+        # Return on Equity (ROE)
+        if 'NetIncomeLoss' in facts and 'StockholdersEquity' in facts:
+            ratios['roe'] = facts['NetIncomeLoss'] / facts['StockholdersEquity']
+        
+        return ratios
+    
+    def get_concept_metadata(self, concept_name: str) -> Dict[str, Any]:
+        """
+        Get detailed metadata for a specific concept.
+        
+        Args:
+            concept_name: Name of the concept to get metadata for
+            
+        Returns:
+            Dictionary containing concept metadata
+        """
+        if not self.model_xbrl:
+            return {}
+            
+        concept = self.model_xbrl.qnameConcepts.get(concept_name)
+        if not concept:
+            return {}
+            
+        metadata = {
+            'name': concept.qname,
+            'type': concept.type.qname,
+            'period_type': concept.periodType,
+            'balance': concept.balance,
+            'labels': {},
+            'references': []
+        }
+        
+        # Get labels in different languages
+        for label in concept.labels():
+            metadata['labels'][label.role] = label.text
+            
+        # Get references
+        for ref in concept.references():
+            metadata['references'].append({
+                'role': ref.role,
+                'text': ref.text
+            })
+            
+        return metadata
+    
+    def export_to_excel(self, output_path: str):
+        """
+        Export XBRL data to Excel with formatted sheets.
+        
+        Args:
+            output_path: Path for output Excel file
+        """
+        if not self.model_xbrl:
+            return
+            
+        # Create Excel writer
+        with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
+            # Export company info
+            company_info = self.get_company_info()
+            pd.DataFrame([company_info]).to_excel(writer, sheet_name='Company Info', index=False)
+            
+            # Export financial statements
+            statements = self.get_financial_statements()
+            for statement_name, df in statements.items():
+                df.to_excel(writer, sheet_name=statement_name, index=False)
+            
+            # Export all facts
+            facts_df = pd.DataFrame(self.extract_facts())
+            facts_df.to_excel(writer, sheet_name='All Facts', index=False)
+            
+            # Export ratios
+            ratios_df = pd.DataFrame([self.calculate_financial_ratios()])
+            ratios_df.to_excel(writer, sheet_name='Financial Ratios', index=False)
+    
+    def get_filing_metadata(self) -> Dict[str, Any]:
+        """
+        Get metadata about the XBRL filing.
+        
+        Returns:
+            Dictionary containing filing metadata
+        """
+        if not self.model_xbrl:
+            return {}
+            
+        metadata = {
+            'submission_date': None,
+            'form_type': None,
+            'filing_date': None,
+            'entity_identifier': None,
+            'fiscal_year_end': None,
+            'fiscal_period': None
+        }
+        
+        # Get submission date and form type
+        for fact in self.model_xbrl.facts:
+            if fact.concept.name == 'DocumentPeriodEndDate':
+                metadata['filing_date'] = fact.value
+            elif fact.concept.name == 'DocumentType':
+                metadata['form_type'] = fact.value
+            elif fact.concept.name == 'EntityCentralIndexKey':
+                metadata['entity_identifier'] = fact.value
+            elif fact.concept.name == 'DocumentFiscalYearFocus':
+                metadata['fiscal_year_end'] = fact.value
+            elif fact.concept.name == 'DocumentFiscalPeriodFocus':
+                metadata['fiscal_period'] = fact.value
+        
+        return metadata
 
 # Example usage
 def example_usage():
@@ -267,26 +554,30 @@ def example_usage():
         print("XBRL file loaded successfully!")
         
         # Get company information
-        company_info = parser.get_company_info()
-        print(f"Company: {company_info.get('company_name', 'Unknown')}")
-        print(f"CIK: {company_info.get('cik', 'Unknown')}")
+        # company_info = parser.get_company_info()
+
+        # print(f"Company: {company_info.get('company_name', 'Unknown')}")
+        # print(f"CIK: {company_info.get('cik', 'Unknown')}")
         
         # Extract specific facts
-        revenue_facts = parser.extract_facts()
-        print(revenue_facts)
+        # revenue_facts = parser.extract_facts()
         
-        # Get financial statements as DataFrames
-        statements = parser.get_financial_statements()
-        for statement_name, df in statements.items():
-            print(f"{statement_name}: {len(df)} facts")
+    #     # Get financial statements as DataFrames
+    #     statements = parser.get_financial_statements()
+    #     for statement_name, df in statements.items():
+    #         print(f"{statement_name}: {len(df)} facts")
         
         # Export to JSON
-        parser.export_to_json("xbrl_data.json")
-        
-        # Clean up
-        parser.close()
-    else:
-        print("Failed to load XBRL file")
+        # parser.export_to_json("xbrl_data.json", include_facts=True, include_company_info=True, include_taxonomy=True)
+        # parser.get_presentation_hierarchy()
+        # parser.get_calculation_relationships()
+        # print(parser.arcrole_uri())
+        parser.get_all_relationships()
+
+    #     # Clean up
+    #     parser.close()
+    # else:
+    #     print("Failed to load XBRL file")
 
 
 if __name__ == "__main__":
