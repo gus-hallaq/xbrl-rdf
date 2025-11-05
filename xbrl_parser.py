@@ -1,4 +1,3 @@
-import os
 import json
 from typing import Dict, List, Optional, Any
 from arelle import Cntlr, ModelManager, FileSource, ModelXbrl
@@ -6,6 +5,10 @@ from arelle.ModelDocument import Type
 from arelle.ModelDtsObject import ModelConcept
 from arelle.ModelInstanceObject import ModelFact
 import pandas as pd
+
+from rdflib import Graph, Literal, Namespace, URIRef, RDF, RDFS, XSD
+
+from xbrl_to_rdf import XBRLToRDF
 
 
 class XBRLParser:
@@ -507,36 +510,17 @@ class XBRLParser:
             ratios_df.to_excel(writer, sheet_name='Financial Ratios', index=False)
     
     def get_filing_metadata(self) -> Dict[str, Any]:
-        """
-        Get metadata about the XBRL filing.
-        
-        Returns:
-            Dictionary containing filing metadata
-        """
+        """Get metadata about the filing."""
         if not self.model_xbrl:
             return {}
             
         metadata = {
-            'submission_date': None,
-            'form_type': None,
-            'filing_date': None,
-            'entity_identifier': None,
-            'fiscal_year_end': None,
-            'fiscal_period': None
+            'filing_date': self.model_xbrl.modelDocument.reportingDate,
+            'document_type': self.model_xbrl.modelDocument.type,
+            'namespaces': dict(self.model_xbrl.namespaceDocs),
+            'schema_refs': [doc.uri for doc in self.model_xbrl.urlDocs.values() if doc.type == Type.SCHEMA],
+            'linkbase_refs': [doc.uri for doc in self.model_xbrl.urlDocs.values() if doc.type == Type.LINKBASE]
         }
-        
-        # Get submission date and form type
-        for fact in self.model_xbrl.facts:
-            if fact.concept.name == 'DocumentPeriodEndDate':
-                metadata['filing_date'] = fact.value
-            elif fact.concept.name == 'DocumentType':
-                metadata['form_type'] = fact.value
-            elif fact.concept.name == 'EntityCentralIndexKey':
-                metadata['entity_identifier'] = fact.value
-            elif fact.concept.name == 'DocumentFiscalYearFocus':
-                metadata['fiscal_year_end'] = fact.value
-            elif fact.concept.name == 'DocumentFiscalPeriodFocus':
-                metadata['fiscal_period'] = fact.value
         
         return metadata
 
@@ -572,8 +556,10 @@ def example_usage():
         # parser.get_presentation_hierarchy()
         # parser.get_calculation_relationships()
         # print(parser.arcrole_uri())
-        parser.get_all_relationships()
-
+        # parser.get_all_relationships()
+        xbrl_to_rdf = XBRLToRDF(parser.model_xbrl)
+        graph = xbrl_to_rdf.xbrl_to_rdf()
+        xbrl_to_rdf.save_rdf_graph(graph,'xbrl_data.ttl','turtle')
     #     # Clean up
     #     parser.close()
     # else:
